@@ -24,7 +24,6 @@ static void write_unsigned(uint32_t value, uint32_t base) {
 }
 
 void kdebug_put(char c) {
-    monitor_put(c);
     if (c == '\n') {
         serial_put('\r');
     }

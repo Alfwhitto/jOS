@@ -13,9 +13,12 @@
 #include "memory_map.h"
 #include "pmm.h"
 #include "paging.h"
+#include "boot_video.h"
 
 // Declare the external linker symbol tracking the absolute end boundary of the kernel image.
 extern char end[];
+
+#define FRAMEBUFFER_VIRT_BASE 0xE0000000u
 
 // Make the tracking variable global so functions like execute_command can parse it.
 uint32_t kernel_end = 0;
@@ -93,6 +96,51 @@ static void copy_trimmed_argument(char *destination, uint32_t capacity, const ch
     destination[length] = '\0';
 }
 
+static int parse_uint32_token(const char **cursor, uint32_t *value) {
+    uint32_t result = 0;
+    const char *text = skip_spaces(*cursor);
+
+    if (*text < '0' || *text > '9') {
+        return 0;
+    }
+
+    while (*text >= '0' && *text <= '9') {
+        result = (result * 10u) + (uint32_t)(*text - '0');
+        text++;
+    }
+
+    *cursor = text;
+    *value = result;
+    return 1;
+}
+
+static int parse_graphics_color(const char **cursor, uint8_t *color) {
+    uint32_t value = 0;
+    if (!parse_uint32_token(cursor, &value) || value > 15u) {
+        return 0;
+    }
+
+    *color = (uint8_t)value;
+    return 1;
+}
+
+static void draw_demo_scene(void) {
+    uint32_t width = monitor_get_width();
+    uint32_t height = monitor_get_height();
+
+    monitor_fill_rect(0, 0, (int)width, (int)height, VGA_COLOR_BLUE);
+    monitor_fill_rect(0, (int)(height / 2), (int)width, (int)(height / 2), VGA_COLOR_GREEN);
+
+    for (uint32_t x = 0; x < width; x += 20) {
+        monitor_draw_line((int)x, 0, (int)(width - 1 - x / 2), (int)(height - 1), VGA_COLOR_LIGHT_CYAN);
+    }
+
+    monitor_fill_rect((int)(width / 2) - 32, (int)(height / 2) - 24, 64, 48, VGA_COLOR_RED);
+    monitor_draw_rect((int)(width / 2) - 40, (int)(height / 2) - 32, 80, 64, VGA_COLOR_WHITE);
+    monitor_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    monitor_write("\nRendered graphics demo scene.\n");
+}
+
 void execute_command(const char *input) {
     monitor_write("\n");
     serial_write("Shell Command Executed: ");
@@ -113,6 +161,11 @@ void execute_command(const char *input) {
         monitor_write("  cat F  - Read a file from the mounted rootfs\n");
         monitor_write("  write F TEXT - Create or overwrite a rootfs file\n");
         monitor_write("  rm F   - Delete a rootfs file from the mounted rootfs\n");
+        monitor_write("  pixel X Y C - Draw one pixel with VGA color 0-15\n");
+        monitor_write("  line X0 Y0 X1 Y1 C - Draw a line\n");
+        monitor_write("  rect X Y W H C - Draw a rectangle outline\n");
+        monitor_write("  fill X Y W H C - Fill a rectangle\n");
+        monitor_write("  gfxdemo - Draw a quick framebuffer demo scene\n");
     } 
     else if (kstrcmp(input, "clear") == 0) {
         monitor_clear();
@@ -243,11 +296,11 @@ void execute_command(const char *input) {
 
         monitor_write("Physical Memory Allocation Breakdown:\n");
         monitor_write("  Total MiB: ");
-        kdebug_write_dec(total);
+        monitor_write_dec(total);
         monitor_write("\n  Used MiB : ");
-        kdebug_write_dec(used);
+        monitor_write_dec(used);
         monitor_write("\n  Free MiB : ");
-        kdebug_write_dec(free_mem);
+        monitor_write_dec(free_mem);
         monitor_write("\n");
         
         serial_write("\n[ MEMORY REPORT ]\n");
@@ -261,13 +314,13 @@ void execute_command(const char *input) {
     else if (kstrcmp(input, "heap") == 0) {
         monitor_write("Kernel Heap Allocation Breakdown:\n");
         monitor_write("  Total bytes  : ");
-        kdebug_write_dec(kheap_get_total_bytes());
+        monitor_write_dec(kheap_get_total_bytes());
         monitor_write("\n  Used bytes   : ");
-        kdebug_write_dec(kheap_get_used_bytes());
+        monitor_write_dec(kheap_get_used_bytes());
         monitor_write("\n  Free bytes   : ");
-        kdebug_write_dec(kheap_get_free_bytes());
+        monitor_write_dec(kheap_get_free_bytes());
         monitor_write("\n  Largest free : ");
-        kdebug_write_dec(kheap_get_largest_free_block());
+        monitor_write_dec(kheap_get_largest_free_block());
         monitor_write("\n");
 
         serial_write("\n[ HEAP REPORT ]\n");
@@ -277,9 +330,9 @@ void execute_command(const char *input) {
         uint32_t heap_base = 0x00400000;
         monitor_write("Paging Translation Check:\n");
         monitor_write("  Heap base virtual: ");
-        kdebug_write_hex(heap_base);
+        monitor_write_hex(heap_base);
         monitor_write("\n  Heap base physical: ");
-        kdebug_write_hex(virt_to_phys(heap_base));
+        monitor_write_hex(virt_to_phys(heap_base));
         monitor_write("\n  Heap base mapped: ");
         monitor_write(is_page_mapped(heap_base) ? "yes\n" : "no\n");
     }
@@ -294,6 +347,81 @@ void execute_command(const char *input) {
             (uint32_t)(_binary_build_embedded_test_program_elf_end -
                        _binary_build_embedded_test_program_elf_start);
         elf_load_and_run(_binary_build_embedded_test_program_elf_start, image_size, &api);
+    }
+    else if (kstrcmp(input, "gfxdemo") == 0) {
+        draw_demo_scene();
+    }
+    else if (kstrncmp(input, "pixel ", 6) == 0) {
+        const char *args = input + 6;
+        uint32_t x = 0;
+        uint32_t y = 0;
+        uint8_t color = 0;
+
+        if (!parse_uint32_token(&args, &x) ||
+            !parse_uint32_token(&args, &y) ||
+            !parse_graphics_color(&args, &color)) {
+            monitor_write("Usage: pixel X Y COLOR(0-15)\n");
+            return;
+        }
+
+        monitor_draw_pixel((int)x, (int)y, color);
+    }
+    else if (kstrncmp(input, "line ", 5) == 0) {
+        const char *args = input + 5;
+        uint32_t x0 = 0;
+        uint32_t y0 = 0;
+        uint32_t x1 = 0;
+        uint32_t y1 = 0;
+        uint8_t color = 0;
+
+        if (!parse_uint32_token(&args, &x0) ||
+            !parse_uint32_token(&args, &y0) ||
+            !parse_uint32_token(&args, &x1) ||
+            !parse_uint32_token(&args, &y1) ||
+            !parse_graphics_color(&args, &color)) {
+            monitor_write("Usage: line X0 Y0 X1 Y1 COLOR(0-15)\n");
+            return;
+        }
+
+        monitor_draw_line((int)x0, (int)y0, (int)x1, (int)y1, color);
+    }
+    else if (kstrncmp(input, "rect ", 5) == 0) {
+        const char *args = input + 5;
+        uint32_t x = 0;
+        uint32_t y = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint8_t color = 0;
+
+        if (!parse_uint32_token(&args, &x) ||
+            !parse_uint32_token(&args, &y) ||
+            !parse_uint32_token(&args, &width) ||
+            !parse_uint32_token(&args, &height) ||
+            !parse_graphics_color(&args, &color)) {
+            monitor_write("Usage: rect X Y WIDTH HEIGHT COLOR(0-15)\n");
+            return;
+        }
+
+        monitor_draw_rect((int)x, (int)y, (int)width, (int)height, color);
+    }
+    else if (kstrncmp(input, "fill ", 5) == 0) {
+        const char *args = input + 5;
+        uint32_t x = 0;
+        uint32_t y = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint8_t color = 0;
+
+        if (!parse_uint32_token(&args, &x) ||
+            !parse_uint32_token(&args, &y) ||
+            !parse_uint32_token(&args, &width) ||
+            !parse_uint32_token(&args, &height) ||
+            !parse_graphics_color(&args, &color)) {
+            monitor_write("Usage: fill X Y WIDTH HEIGHT COLOR(0-15)\n");
+            return;
+        }
+
+        monitor_fill_rect((int)x, (int)y, (int)width, (int)height, color);
     }
     else if (kstrcmp(input, "ls") == 0) {
         fat_file_info_t entries[32];
@@ -311,7 +439,7 @@ void execute_command(const char *input) {
                 monitor_write(" <DIR>");
             } else {
                 monitor_write(" ");
-                kdebug_write_dec(entries[i].size);
+                monitor_write_dec(entries[i].size);
                 monitor_write(" bytes");
             }
             monitor_write("\n");
@@ -381,20 +509,34 @@ void execute_command(const char *input) {
     }
 }
 
-void kernel_main(uint32_t mmap_entry_count, bios_e820_entry_t* mmap_entries) {
+static int map_framebuffer(const boot_video_info_t *video_info) {
+    uint32_t framebuffer_size = video_info->pitch * video_info->height;
+    uint32_t page_count = (framebuffer_size + 0xFFFu) / 0x1000u;
+    uint32_t physical_base = video_info->framebuffer_phys & 0xFFFFF000u;
+    uint32_t offset = video_info->framebuffer_phys & 0xFFFu;
+
+    if (offset != 0) {
+        page_count = (framebuffer_size + offset + 0xFFFu) / 0x1000u;
+    }
+
+    for (uint32_t i = 0; i < page_count; i++) {
+        if (!map_page(FRAMEBUFFER_VIRT_BASE + (i * 0x1000u),
+                      physical_base + (i * 0x1000u),
+                      PAGING_FLAG_WRITABLE)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+void kernel_main(uint32_t mmap_entry_count, bios_e820_entry_t* mmap_entries,
+                 boot_video_info_t *video_info) {
     // Safely extract the runtime link address inside the execution context
     kernel_end = (uint32_t)end;
 
     init_serial();
     serial_write("\n--- COM1 Serial Logging Link Online ---\n\n");
-
-    monitor_clear();
-    
-    monitor_set_color(VGA_COLOR_LIGHT_MAGENTA, VGA_COLOR_BLACK);
-    monitor_write("Starting Custom Minimal Monolithic Kernel...\n");
-    monitor_write("Build Target: i686-elf (32-bit Protected Mode)\n");
-    monitor_write("--------------------------------------------------\n\n");
-    monitor_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     kdebug_write_line("[BOOT] Serial and VGA logging are now mirrored in lockstep.");
     kdebug_write("[BOOT] BIOS E820 entry count received: ");
@@ -422,12 +564,36 @@ void kernel_main(uint32_t mmap_entry_count, bios_e820_entry_t* mmap_entries) {
     klog_info("Parsing BIOS E820 memory map and initializing Page Frame Allocator (PMM)...");
     if (mmap_entries && mmap_entry_count) {
         pmm_init(mmap_entries, mmap_entry_count, 0x8000, kernel_end);
-        klog_ok("PMM Allocation Bitmap constructed. Core RAM regions initialized.");
+        serial_write("[  OK  ] PMM Allocation Bitmap constructed. Core RAM regions initialized.\n");
     } else {
-        klog_warn("BIOS memory map structurally null! Physical Memory Allocator offline.");
+        serial_write("[ WARN ] BIOS memory map structurally null! Physical Memory Allocator offline.\n");
     }
 
     init_paging(kernel_end);
+
+    if (video_info && video_info->magic == BOOT_VIDEO_MAGIC) {
+        if (map_framebuffer(video_info)) {
+            uint32_t framebuffer_virt = FRAMEBUFFER_VIRT_BASE + (video_info->framebuffer_phys & 0xFFFu);
+            monitor_init(video_info, (void *)framebuffer_virt);
+            monitor_set_color(VGA_COLOR_LIGHT_MAGENTA, VGA_COLOR_BLACK);
+            monitor_write("Starting Custom Minimal Monolithic Kernel...\n");
+            monitor_write("Build Target: i686-elf (32-bit Protected Mode)\n");
+            monitor_write("Display: ");
+            monitor_write_dec(video_info->width);
+            monitor_write("x");
+            monitor_write_dec(video_info->height);
+            monitor_write("x");
+            monitor_write_dec(video_info->bpp);
+            monitor_write(" graphics console with 8x8 shell font\n");
+            monitor_write("--------------------------------------------------\n\n");
+            monitor_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        } else {
+            serial_write("[ WARN ] Failed to map the boot framebuffer. Console output will stay on serial only.\n");
+        }
+    } else {
+        serial_write("[ WARN ] No VBE framebuffer info was provided by the bootloader.\n");
+    }
+
     kdebug_write("[BOOT] Paging status check complete. PMM total frames tracked: ");
     kdebug_write_dec(pmm_get_total_frames());
     kdebug_put('\n');

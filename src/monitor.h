@@ -2,6 +2,7 @@
 #define MONITOR_H
 
 #include <stdint.h>
+#include "boot_video.h"
 
 // Standard VGA Text Mode Colors
 #define VGA_COLOR_BLACK         0
@@ -22,10 +23,19 @@
 #define VGA_COLOR_WHITE         15
 
 // Core Video Functions
+void monitor_init(const boot_video_info_t *video_info, void *framebuffer_virt);
 void monitor_clear();
 void monitor_put(char c);
 void monitor_write(const char *string);
+void monitor_write_dec(uint32_t value);
+void monitor_write_hex(uint32_t value);
 void monitor_set_color(uint8_t foreground, uint8_t background);
+void monitor_draw_pixel(int x, int y, uint8_t color);
+void monitor_draw_line(int x0, int y0, int x1, int y1, uint8_t color);
+void monitor_draw_rect(int x, int y, int width, int height, uint8_t color);
+void monitor_fill_rect(int x, int y, int width, int height, uint8_t color);
+uint32_t monitor_get_width(void);
+uint32_t monitor_get_height(void);
 
 // Hardware Cursor Controls
 void monitor_disable_cursor();

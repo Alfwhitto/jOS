@@ -8,6 +8,9 @@ DISK_HEADS equ 16
 DISK_SECTORS_PER_TRACK equ 63
 MMAP_COUNT_ADDR equ 0x1000   ; Relocated away from BIOS scratch space
 MMAP_DATA_ADDR  equ 0x1004   ; Relocated away from BIOS scratch space
+VIDEO_INFO_ADDR equ 0x1100
+MODE_INFO_ADDR  equ 0x1400
+VBE_MODE_PRIMARY equ 0x118
 
 %ifndef KERNEL_START_LBA
 KERNEL_START_LBA equ 1
@@ -18,10 +21,6 @@ KERNEL_START_LBA equ 1
 main:
     mov [BOOT_DRIVE], dl ; Save boot drive number safely in memory
 
-    call init_serial
-    mov al, 'S'
-    call serial_put
-
     ; Safe stack setup in 16-bit mode
     cli
     xor ax, ax
@@ -31,10 +30,9 @@ main:
     mov sp, 0x7C00
     sti
 
-    ; Clear the screen to ensure a clean text page coordinate state
-    mov ah, 0x00
-    mov al, 0x03
-    int 0x10
+    ; Select a higher-resolution VBE linear framebuffer so the shell gets
+    ; substantially more text cells than mode 13h can provide.
+    call init_video_mode
 
     ; --- Detect Memory via BIOS INT 0x15, E820 ---
     call detect_memory
@@ -82,14 +80,9 @@ main:
     mov ax, [load_segment]
     mov es, ax
     mov bx, KERNEL_LOAD_OFF
-    mov al, 'B'
-    call serial_put
     mov ax, 0x0201
     int 0x13
     jc disk_error
-
-    mov al, 'K'
-    call serial_put
 
     add word [current_lba], 1
     add word [load_segment], 0x20
@@ -156,41 +149,54 @@ detect_memory:
     popa
     ret
 
-init_serial:
-    mov dx, 0x3F9
-    xor al, al
-    out dx, al
-    mov dx, 0x3FB
-    mov al, 0x80
-    out dx, al
-    mov dx, 0x3F8
-    mov al, 0x01
-    out dx, al
-    mov dx, 0x3F9
-    xor al, al
-    out dx, al
-    mov dx, 0x3FB
-    mov al, 0x03
-    out dx, al
-    mov dx, 0x3FC
-    mov al, 0x0B
-    out dx, al
+init_video_mode:
+    pusha
+
+    xor ax, ax
+    mov es, ax
+    mov di, MODE_INFO_ADDR
+    mov cx, VBE_MODE_PRIMARY
+    mov ax, 0x4F01
+    int 0x10
+    cmp ax, 0x004F
+    jne .fail
+
+    mov bx, VBE_MODE_PRIMARY
+    or bx, 0x4000
+    mov ax, 0x4F02
+    int 0x10
+    cmp ax, 0x004F
+    jne .fail
+
+    xor ax, ax
+    mov es, ax
+    mov di, VIDEO_INFO_ADDR
+    mov dword [es:di + 0x00], 0x56494430
+    mov eax, [es:MODE_INFO_ADDR + 0x28]
+    mov [es:di + 0x04], eax
+    mov ax, [es:MODE_INFO_ADDR + 0x12]
+    mov [es:di + 0x08], ax
+    mov word [es:di + 0x0A], 0
+    mov ax, [es:MODE_INFO_ADDR + 0x14]
+    mov [es:di + 0x0C], ax
+    mov word [es:di + 0x0E], 0
+    mov ax, [es:MODE_INFO_ADDR + 0x10]
+    mov [es:di + 0x10], ax
+    mov word [es:di + 0x12], 0
+    mov al, [es:MODE_INFO_ADDR + 0x19]
+    mov [es:di + 0x14], al
+
+    popa
     ret
 
-serial_put:
-    push dx
-    push bx
-    mov bl, al
-.wait:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait
-    mov al, bl
-    mov dx, 0x3F8
-    out dx, al
-    pop bx
-    pop dx
+.fail:
+    xor ax, ax
+    mov es, ax
+    mov di, VIDEO_INFO_ADDR
+    mov dword [es:di + 0x00], 0
+    mov ax, 0x0003
+    int 0x10
+    popa
     ret
 
 enable_a20:
@@ -221,11 +227,9 @@ init_32bit:
     jmp KERNEL_OFFSET   
 
 disk_error:
-    mov al, 'D'
-    call serial_put
-    ; Print red failure text directly to VGA video memory (0xB8000)
-    mov dword [0xB8000], 0x4F524F45 ; "E R" (Red background)
-    mov dword [0xB8004], 0x4F524F52 ; "R O"
+    mov ah, 0x0E
+    mov al, 'E'
+    int 0x10
     jmp $
 
 ; Global Descriptor Table (GDT) Layout
@@ -250,5 +254,7 @@ sectors_remaining: dw 0
 load_segment: dw 0
 current_lba: dd 0
 
+%ifndef KERNEL_PRELOADED
 times 510-($-$$) db 0
 dw 0xAA55
+%endif

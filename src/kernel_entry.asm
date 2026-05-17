@@ -14,6 +14,7 @@ _start:
     mov esp, stack_top
 
     ; Pass parameters tracking to kernel_main (Right-to-Left)
+    push dword 0x1100               ; Argument 3: Pointer to boot video info
     push dword 0x1004               ; Argument 2: Pointer to memory map entry array
     push dword [0x1000]             ; Argument 1: Value of total entries detected
     

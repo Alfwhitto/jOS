@@ -1,0 +1,1 @@
+STAGE2_SECTORS equ 1
